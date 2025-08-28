@@ -1,39 +1,177 @@
-import { useState } from 'react'
-import reactLogo from './assets/react.svg'
-import viteLogo from '/vite.svg'
+import { useCallback, useEffect, useState } from 'react'
+import { ToastContainer } from 'react-toastify'
+import { ImageUpload } from './components/ImageUpload'
+import { PromptField } from './components/PromptField'
+import { StyleDropDown } from './components/StyleDropDown'
+import { Preview } from './components/Preview'
+import { toast } from 'react-toastify'
+import { retryWithBackoff } from './utils/common'
+import { generate } from './services/mockApi'
+import { GenerateButton } from './components/GenerateButton'
+import { clearHistory, getHistory, saveToHistory } from './utils/storageUtils'
+import { History } from './components/History'
+import type { Generation } from './types'
+import {
+  generationAbortMessage,
+  generationErrorMessage,
+  generationSuccessMessage,
+  generationValidationFailedMessage,
+} from './constants/toastMessage'
+import {
+  generationAbortedByUser,
+  unknownError,
+} from './constants/validationError'
 import './App.css'
 
 function App() {
-  const [count, setCount] = useState(0)
+  const [image, setImage] = useState<string | null>(null)
+  const [prompt, setPrompt] = useState<string>('')
+  const [style, setStyle] = useState<string>('editorial')
+
+  const [history, setHistory] = useState<Generation[]>([])
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [abortController, setAbortController] =
+    useState<AbortController | null>(null)
+
+  const handleGenerate = async () => {
+    if (!image || !prompt.trim()) {
+      toast.error(generationValidationFailedMessage)
+      return
+    }
+
+    const abortController = new AbortController()
+
+    setLoading(true)
+    setError(null)
+    setAbortController(abortController)
+
+    try {
+      const generation = await retryWithBackoff(
+        () =>
+          generate(
+            {
+              imageDataUrl: image,
+              prompt: prompt.trim(),
+              style: style,
+            },
+            abortController.signal
+          ),
+        3,
+        1000
+      )
+
+      // Save to history
+      saveToHistory(generation)
+      setHistory(getHistory())
+
+      // Update state
+      setLoading(false)
+      setAbortController(null)
+      setError(null)
+      // Update preview with generated result
+      setImage(generation.imageUrl)
+      setPrompt(generation.prompt)
+      setStyle(generation.style)
+
+      toast.success(generationSuccessMessage)
+    } catch (error) {
+      if (error instanceof Error && error.message === 'Request aborted') {
+        toast.error(generationAbortMessage)
+      } else {
+        const errorMessage =
+          error instanceof Error ? error.message : unknownError
+        setError(`Generation failed: ${errorMessage}`)
+
+        toast.error(generationErrorMessage)
+      }
+    } finally {
+      setLoading(false)
+      setAbortController(null)
+    }
+  }
+
+  const handleAbort = useCallback(() => {
+    if (abortController) {
+      abortController.abort()
+      setLoading(false)
+      setAbortController(null)
+      setError(generationAbortedByUser)
+    }
+  }, [abortController])
+
+  const handleSelectHistoryItem = (item: Generation) => {
+    setImage(item.imageUrl)
+    setPrompt(item.prompt)
+    setStyle(item.style)
+    setError(null)
+  }
+
+  const handleClearHistory = () => {
+    clearHistory()
+    setHistory([])
+  }
+
+  useEffect(() => {
+    setHistory(getHistory())
+  }, [])
+
+  const canGenerate = Boolean(image && prompt.trim() && !loading)
 
   return (
-    <>
-      <div>
-        <a href="https://vite.dev" target="_blank" rel="noreferrer noopener">
-          <img src={viteLogo} className="logo" alt="Vite logo" />
-        </a>
-        <a href="https://react.dev" target="_blank" rel="noreferrer noopener">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+    <div className="min-h-screen bg-gray-100 w-full p-4">
+      <header className="text-center mb-12">
+        <h1 className="text-4xl font-bold text-purple-600">AI Studio</h1>
+      </header>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 lg:justify-center gap-4">
+        <div className="flex flex-col gap-3">
+          <ImageUpload
+            currentImage={image}
+            onImageSelect={(dataUrl) => {
+              setImage(dataUrl)
+            }}
+          />
+          <PromptField
+            value={prompt}
+            onChange={(value) => {
+              setPrompt(value)
+            }}
+          />
+          <StyleDropDown
+            value={style}
+            onChange={(value) => {
+              setStyle(value)
+            }}
+          />
+          <GenerateButton
+            canGenerate={canGenerate}
+            isLoading={loading}
+            onGenerate={() => void handleGenerate()}
+            onAbort={handleAbort}
+            error={error}
+          />
+        </div>
+        <Preview image={image} prompt={prompt} style={style} />
+        <History
+          history={history}
+          onSelectItem={handleSelectHistoryItem}
+          onClearHistory={handleClearHistory}
+        />
       </div>
-      <h1>Vite + React</h1>
-      <div className="card">
-        <button
-          type="button"
-          onClick={() => {
-            setCount((count) => count + 1)
-          }}
-        >
-          count is {count}
-        </button>
-        <p>
-          Edit <code>src/App.tsx</code> and save to test HMR
-        </p>
-      </div>
-      <p className="read-the-docs">
-        Click on the Vite and React logos to learn more
-      </p>
-    </>
+
+      <ToastContainer
+        position="top-right"
+        autoClose={3000}
+        hideProgressBar={false}
+        newestOnTop={true}
+        closeOnClick
+        rtl={false}
+        pauseOnFocusLoss
+        draggable
+        pauseOnHover
+        theme="colored"
+      />
+    </div>
   )
 }
 
